@@ -2809,6 +2809,26 @@ class GenerationHandler:
                         str(fingerprint.get("proxy_url") or "").strip(),
                     )
 
+                # 缓存视频 (如果启用)，与轮询完成的视频保持一致
+                if config.cache_enabled:
+                    try:
+                        if stream:
+                            yield self._create_stream_chunk("正在缓存视频文件...\n")
+                        cached_filename = await self.file_cache.download_and_cache(
+                            direct_video_url, "video"
+                        )
+                        direct_video_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                    except Exception as e:
+                        debug_logger.log_error(f"Failed to cache video: {str(e)}")
+                        # 缓存失败不影响结果返回,使用原始URL
+                        if stream:
+                            cache_error = self._normalize_error_message(
+                                e, max_length=120
+                            )
+                            yield self._create_stream_chunk(
+                                f"⚠️ 缓存失败: {cache_error}\n正在返回源链接...\n"
+                            )
+
                 duration = time.time() - submit_started_at
                 response_state["url"] = direct_video_url
                 response_state["generated_assets"] = {

@@ -718,6 +718,9 @@ class UpdateTokenRequest(BaseModel):
     proxy_url: Optional[str] = None
     auto_refresh_enabled: Optional[bool] = None
     refresh_interval_minutes: Optional[int] = None
+    user_paygate_tier: Optional[
+        Literal["PAYGATE_TIER_NOT_PAID", "PAYGATE_TIER_ONE", "PAYGATE_TIER_TWO"]
+    ] = None
 
     @field_validator("login_account")
     @classmethod
@@ -1150,6 +1153,7 @@ async def update_token(
             proxy_url=request.proxy_url,
             auto_refresh_enabled=request.auto_refresh_enabled,
             refresh_interval_minutes=request.refresh_interval_minutes,
+            user_paygate_tier=request.user_paygate_tier,
         )
 
         # 热更新并发限制，确保管理台修改立即生效

@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, List
 from ..core.database import Database
 from ..core.config import config
 from ..core.models import Token, Project
+from ..core.account_tiers import PAYGATE_TIER_TWO
 from ..core.logger import debug_logger
 from ..core.monitoring import record_token_refresh
 from .flow_client import FlowClient
@@ -532,6 +533,7 @@ class TokenManager:
         proxy_url: Optional[str] = None,
         auto_refresh_enabled: Optional[bool] = None,
         refresh_interval_minutes: Optional[int] = None,
+        user_paygate_tier: Optional[str] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
@@ -588,6 +590,8 @@ class TokenManager:
             update_fields["refresh_interval_minutes"] = (
                 self._normalize_refresh_interval(refresh_interval_minutes)
             )
+        if user_paygate_tier is not None:
+            update_fields["user_paygate_tier"] = user_paygate_tier
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)
@@ -653,6 +657,17 @@ class TokenManager:
 
         return False
 
+    async def _keep_manual_ultra_tier(
+        self, token_id: int, inferred_tier: Optional[str]
+    ) -> Optional[str]:
+        """新版积分接口只能推断出 Free/Pro，已手动标记为 Ult 的账号不被覆盖。"""
+        if inferred_tier == PAYGATE_TIER_TWO:
+            return inferred_tier
+        current = await self.db.get_token(token_id)
+        if current and current.user_paygate_tier == PAYGATE_TIER_TWO:
+            return PAYGATE_TIER_TWO
+        return inferred_tier
+
     def needs_at_refresh(self, token: Optional[Token]) -> bool:
         """供调度层快速判断当前 token 是否大概率会触发 AT 刷新。"""
         if not token:
@@ -672,7 +687,9 @@ class TokenManager:
                 await self.db.update_token(
                     token.id,
                     credits=credits_result.get("credits", 0),
-                    user_paygate_tier=credits_result.get("userPaygateTier"),
+                    user_paygate_tier=await self._keep_manual_ultra_tier(
+                        token.id, credits_result.get("userPaygateTier")
+                    ),
                 )
                 self._mark_at_valid(token.id)
                 return await self.db.get_token(token.id) or token
@@ -826,7 +843,9 @@ class TokenManager:
                 await self.db.update_token(
                     token_id,
                     credits=credits_result.get("credits", 0),
-                    user_paygate_tier=credits_result.get("userPaygateTier"),
+                    user_paygate_tier=await self._keep_manual_ultra_tier(
+                        token_id, credits_result.get("userPaygateTier")
+                    ),
                 )
                 self._mark_at_valid(token_id)
                 debug_logger.log_info(
@@ -894,7 +913,9 @@ class TokenManager:
         if "credits" in session:
             updates["credits"] = session["credits"]
         if "userPaygateTier" in session:
-            updates["user_paygate_tier"] = session["userPaygateTier"]
+            updates["user_paygate_tier"] = await self._keep_manual_ultra_tier(
+                token_id, session["userPaygateTier"]
+            )
         saved = await self.db.update_token_if_cookie_matches(
             token_id, token.google_cookies, **updates
         )
@@ -1237,7 +1258,9 @@ class TokenManager:
                 token_id=token.id,
             )
             credits = result.get("credits", 0)
-            user_paygate_tier = result.get("userPaygateTier")
+            user_paygate_tier = await self._keep_manual_ultra_tier(
+                token_id, result.get("userPaygateTier")
+            )
 
             # 更新数据库
             await self.db.update_token(
