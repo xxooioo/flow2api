@@ -13,6 +13,7 @@ from curl_cffi.requests.cookies import CurlMorsel
 
 from ..core.logger import debug_logger
 from .browser_cookie_utils import (
+    GOOGLE_DOMAIN_COOKIE_NAMES,
     cookie_pairs_for_url,
     normalize_cookie_storage_text,
     parse_browser_cookie_payload,
@@ -51,6 +52,8 @@ def _cookie_jar(raw: str) -> CookieJar:
             for name, value in cookie_pairs_for_url(raw)
         ]
     for item in items:
+        if not item.get("domain") and item.get("name") in GOOGLE_DOMAIN_COOKIE_NAMES:
+            item = {**item, "domain": ".google.com"}
         domain = item.get("domain") or urlparse(item.get("url", FLOW_BASE)).hostname
         domain = str(domain or "").lower()
         if domain.lstrip(".") != "google.com" and not domain.endswith(".google.com"):

@@ -41,6 +41,25 @@ GOOGLE_ACCOUNT_COOKIE_NAMES = frozenset(
         "__Secure-3PSID",
     }
 )
+# 仅含 name=value 的 Cookie 请求头没有作用域信息；这些是 .google.com 账号域 Cookie，
+# 需要随 accounts.google.com 的登录态续期请求一起发送。
+GOOGLE_DOMAIN_COOKIE_NAMES = GOOGLE_ACCOUNT_COOKIE_NAMES | frozenset(
+    {
+        "SIDCC",
+        "NID",
+        "AEC",
+        "SOCS",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS",
+        "__Secure-1PSIDCC",
+        "__Secure-3PSIDCC",
+        "__Secure-1PSIDRTS",
+        "__Secure-3PSIDRTS",
+        "__Secure-ENID",
+    }
+)
 _SAFE_COOKIE_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 

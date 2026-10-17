@@ -129,7 +129,31 @@ class ProtocolCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_plain_cookie_header_remains_supported(self):
         jar = _cookie_jar("OSID=session; SID=account")
         self.assertEqual({c.name for c in jar}, {"OSID", "SID"})
-        self.assertTrue(all(not c.domain_specified for c in jar))
+        scopes = {c.name: (c.domain, c.domain_specified) for c in jar}
+        self.assertEqual(scopes["OSID"], ("flow.google.com", False))
+        self.assertEqual(scopes["SID"], (".google.com", True))
+
+    async def test_plain_cookie_header_sends_account_cookies_to_accounts_domain(self):
+        from urllib.request import Request
+
+        jar = _cookie_jar(
+            "OSID=session; __Secure-OSID=s2; SID=a; HSID=h; APISID=p; "
+            "__Secure-1PSIDTS=ts; NID=n; flow_pref=x"
+        )
+        accounts = Request("https://accounts.google.com/ServiceLogin")
+        jar.add_cookie_header(accounts)
+        sent = accounts.get_header("Cookie")
+        for name in ("SID=a", "HSID=h", "APISID=p", "__Secure-1PSIDTS=ts", "NID=n"):
+            self.assertIn(name, sent)
+        self.assertNotIn("OSID", sent)
+        self.assertNotIn("flow_pref", sent)
+        flow = Request("https://flow.google.com/projects")
+        jar.add_cookie_header(flow)
+        for name in ("OSID=session", "__Secure-OSID=s2", "SID=a", "flow_pref=x"):
+            self.assertIn(name, flow.get_header("Cookie"))
+        exported = {c["name"]: c for c in json.loads(_export_cookie_jar(jar, ""))}
+        self.assertEqual(exported["SID"]["domain"], ".google.com")
+        self.assertTrue(exported["OSID"]["hostOnly"])
 
     async def test_multiline_cookie_text_preserves_separate_names_and_values(self):
         for raw in (
