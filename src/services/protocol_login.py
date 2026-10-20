@@ -201,11 +201,15 @@ class ProtocolLogin:
                     "success": False,
                     "error": "Flow 页面未返回已登录账号，请重新同步 Google Cookies",
                 }
-            if email and account_email.casefold() != email.strip().casefold():
-                return {
-                    "success": False,
-                    "error": "Flow 登录账号与当前 Token 不一致，请同步对应账号的 Google Cookies",
-                }
+            expected_email = str(email or "").strip()
+            if (
+                expected_email
+                and account_email.casefold() != expected_email.casefold()
+            ):
+                # 邮箱以 Flow 页面为准，调用方据此自动更正本地账号信息。
+                debug_logger.log_warning(
+                    f"[PROTOCOL_LOGIN] 登录账号已变更: {expected_email} -> {account_email}"
+                )
             digest = hashlib.sha256(refreshed_cookies.encode("utf-8")).hexdigest()[:32]
             return {
                 "success": True,

@@ -51,7 +51,7 @@ class Token(BaseModel):
     login_password: str = ""
     proxy_url: str = ""
     auto_refresh_enabled: bool = True
-    refresh_interval_minutes: int = 120
+    refresh_interval_minutes: int = 30
     last_st_refresh_at: Optional[datetime] = None
     last_st_refresh_result: str = ""
 
@@ -190,7 +190,7 @@ class CaptchaConfig(BaseModel):
 
     id: int = 1
     captcha_method: str = (
-        "yescaptcha"  # yescaptcha/captcharun/twocaptcha/capsolver/ezcaptcha/browser/personal/remote_browser
+        "yescaptcha"  # yescaptcha/flow2api_team/captcharun/twocaptcha/capsolver/ezcaptcha/browser/personal/remote_browser
     )
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
@@ -240,7 +240,7 @@ class TokenRefreshConfig(BaseModel):
 
     id: int = 1
     enabled: bool = True
-    refresh_interval_minutes: int = 120
+    refresh_interval_minutes: int = 30
     updated_at: Optional[datetime] = None
 
 

@@ -3,6 +3,7 @@ import json
 import tempfile
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from curl_cffi import CurlInfo
@@ -115,12 +116,14 @@ class ProtocolCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
         result, _, _ = await self.call_login(page="boq_labs-ai-sandbox-frontend_")
         self.assertFalse(result["success"])
 
-    async def test_wrong_account_is_rejected(self):
+    async def test_wrong_account_is_reported_instead_of_failing(self):
+        """账号不匹配时不再报错，而是把 Flow 页面的真实邮箱回传，由调用方自动更正。"""
         result, _, _ = await self.call_login(
             page=PAGE.replace(EMAIL, "other@example.com")
         )
-        self.assertFalse(result["success"])
-        self.assertNotIn("google_cookies", result)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["email"], "other@example.com")
+        self.assertIn("google_cookies", result)
 
     async def test_login_redirect_is_rejected(self):
         result, _, _ = await self.call_login(url="https://accounts.google.com/signin")
@@ -426,16 +429,36 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.flow.st_to_at.call_args.kwargs["google_cookies"], NEW_COOKIES
         )
 
-    async def test_identity_mismatch_does_not_call_authenticated_rpc(self):
+    async def test_identity_mismatch_is_adopted_from_flow_page(self):
+        """Cookie 属于另一个账号时，刷新应以 Flow 页面为准自动更正邮箱。"""
+        self.login_mock.return_value["email"] = "other@example.com"
+        token = await self.db.get_token(self.token_id)
+        self.assertTrue(await self.manager._try_protocol_refresh_st(self.token_id, token))
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.email, "other@example.com")
+        self.assertEqual(latest.login_account, "other@example.com")
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+        self.assertEqual(latest.last_st_refresh_result, "success")
+
+    async def test_identity_conflict_with_other_token_is_rejected(self):
+        await self.db.add_token(
+            Token(
+                st="frontend-other",
+                email="other@example.com",
+                login_account="other@example.com",
+                google_cookies=COOKIES,
+            )
+        )
         self.login_mock.return_value["email"] = "other@example.com"
         token = await self.db.get_token(self.token_id)
         self.assertIsNone(
             await self.manager._try_protocol_refresh_st(self.token_id, token)
         )
-        self.flow.st_to_at.assert_not_awaited()
-        self.assertEqual(
-            (await self.db.get_token(self.token_id)).google_cookies, COOKIES
-        )
+        latest = await self.db.get_token(self.token_id)
+        # 不覆盖本地账号邮箱，也不保存别家账号的 Cookie
+        self.assertEqual(latest.email, EMAIL)
+        self.assertEqual(latest.google_cookies, COOKIES)
+        self.assertIn("已被 Token", latest.last_st_refresh_result)
 
     async def test_personal_network_failures_keep_account_active(self):
         self.flow._is_proxy_connection_error.return_value = False
@@ -486,6 +509,247 @@ class TokenCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
             config.captcha_method = "personal"
             self.assertFalse(await self.manager._refresh_at_inner(self.token_id))
         self.assertFalse((await self.db.get_token(self.token_id)).is_active)
+
+
+class CookieRefreshScheduleTests(unittest.IsolatedAsyncioTestCase):
+    """The Flow frontend AT is static, so refresh must follow the Cookie interval."""
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Database(db_path=self.temp.name + "/flow.db")
+        await self.db.init_db()
+        self.token_id = await self.db.add_token(
+            Token(
+                st="frontend-old",
+                at="flow-frontend-cookie",
+                at_expires=datetime.now(timezone.utc) + timedelta(minutes=55),
+                email=EMAIL,
+                google_cookies=COOKIES,
+                login_account=EMAIL,
+                refresh_interval_minutes=120,
+                last_st_refresh_at=datetime.now(timezone.utc),
+                last_st_refresh_result="success",
+            )
+        )
+        self.flow = MagicMock()
+        self.flow.FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
+        self.flow.proxy_manager = None
+        self.flow.get_request_fingerprint.return_value = None
+        self.flow.st_to_at = AsyncMock(
+            return_value={"access_token": "flow-frontend-cookie"}
+        )
+        self.flow.get_credits = AsyncMock(
+            return_value={"credits": 7, "userPaygateTier": None}
+        )
+        self.manager = TokenManager(self.db, self.flow)
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    async def test_newly_refreshed_cookie_is_not_refreshed_again(self):
+        token = await self.db.get_token(self.token_id)
+        self.assertFalse(self.manager.needs_at_refresh(token))
+        refreshed = await self.manager.ensure_valid_token(token)
+        self.assertIsNotNone(refreshed)
+        self.flow.st_to_at.assert_not_awaited()
+
+    async def test_interval_elapsed_marks_cookie_for_refresh(self):
+        await self.db.update_token(
+            self.token_id,
+            last_st_refresh_at=datetime.now(timezone.utc) - timedelta(minutes=121),
+        )
+        token = await self.db.get_token(self.token_id)
+        self.assertTrue(self.manager.needs_at_refresh(token))
+
+    async def test_due_interval_rotates_cookies_instead_of_revalidating_at(self):
+        await self.db.update_token(
+            self.token_id,
+            last_st_refresh_at=datetime.now(timezone.utc) - timedelta(minutes=121),
+        )
+        token = await self.db.get_token(self.token_id)
+        with patch(
+            "src.services.protocol_login.protocol_loginer.login",
+            new_callable=AsyncMock,
+        ) as login:
+            login.return_value = {
+                "success": True,
+                "google_cookies": NEW_COOKIES,
+                "email": EMAIL,
+            }
+            refreshed = await self.manager.ensure_valid_token(token)
+        self.assertIsNotNone(refreshed)
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+        self.assertEqual(latest.last_st_refresh_result, "success")
+        self.assertEqual(
+            self.flow.st_to_at.call_args.kwargs["google_cookies"], NEW_COOKIES
+        )
+        self.assertFalse(self.manager.needs_at_refresh(latest))
+
+    async def test_disabled_auto_refresh_never_marks_cookie_for_refresh(self):
+        await self.db.update_token(
+            self.token_id,
+            auto_refresh_enabled=False,
+            last_st_refresh_at=datetime.now(timezone.utc) - timedelta(days=30),
+        )
+        token = await self.db.get_token(self.token_id)
+        self.assertFalse(self.manager.needs_at_refresh(token))
+
+    async def test_recent_validation_skips_repeated_credits_lookup(self):
+        token = await self.db.get_token(self.token_id)
+        await self.manager.ensure_valid_token(token)
+        self.manager._mark_at_valid(self.token_id)
+        await self.manager.ensure_valid_token(token)
+        self.flow.get_credits.assert_awaited_once()
+
+
+class PlaceholderIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Database(db_path=self.temp.name + "/flow.db")
+        await self.db.init_db()
+        self.token_id = await self.db.add_token(
+            Token(
+                st="frontend-old",
+                at="flow-frontend-cookie",
+                email="account-1234@flow.local",
+                google_cookies=COOKIES,
+                login_account="",
+            )
+        )
+        self.flow = MagicMock()
+        self.flow.FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
+        self.flow.proxy_manager = None
+        self.flow.get_request_fingerprint.return_value = None
+        self.flow.st_to_at = AsyncMock(
+            return_value={"access_token": "flow-frontend-cookie"}
+        )
+        self.manager = TokenManager(self.db, self.flow)
+        self.login = patch(
+            "src.services.protocol_login.protocol_loginer.login", new_callable=AsyncMock
+        )
+        self.login_mock = self.login.start()
+        self.login_mock.return_value = {
+            "success": True,
+            "google_cookies": NEW_COOKIES,
+            "email": EMAIL,
+        }
+
+    async def asyncTearDown(self):
+        self.login.stop()
+        self.temp.cleanup()
+
+    async def test_refresh_replaces_placeholder_email_with_real_account(self):
+        self.assertTrue(await self.manager.refresh_cookies(self.token_id))
+        latest = await self.db.get_token(self.token_id)
+        self.assertEqual(latest.email, EMAIL)
+        self.assertEqual(latest.login_account, EMAIL)
+        self.assertEqual(latest.google_cookies, NEW_COOKIES)
+
+    async def test_detect_account_identity_reads_email_and_refreshed_cookies(self):
+        identity = await self.manager.detect_account_identity(COOKIES)
+        self.assertEqual(identity["email"], EMAIL)
+        self.assertEqual(identity["google_cookies"], NEW_COOKIES)
+        self.assertTrue(identity["st"].startswith("frontend-"))
+
+    async def test_add_token_uses_detected_email_instead_of_placeholder(self):
+        self.flow.get_credits = AsyncMock(
+            return_value={"credits": 5, "userPaygateTier": None}
+        )
+        self.flow.create_project = AsyncMock(side_effect=lambda *a, **k: "project-1")
+        with patch("src.services.token_manager.config") as config:
+            config.personal_project_pool_size = 1
+            token = await self.manager.add_token(st="", google_cookies=COOKIES)
+        self.assertEqual(token.email, EMAIL)
+        self.assertEqual(token.login_account, EMAIL)
+        self.assertTrue(token.auto_refresh_enabled)
+        stored = await self.db.get_token(token.id)
+        self.assertEqual(stored.last_st_refresh_result, "success")
+        self.assertIsNotNone(stored.last_st_refresh_at)
+
+
+class ImportPayloadTests(unittest.TestCase):
+    def test_login_account_is_optional_for_cookie_only_import(self):
+        from src.api.admin import ImportTokenItem, ImportTokensRequest
+
+        item = ImportTokenItem(google_cookies=COOKIES)
+        self.assertIsNone(item.login_account)
+        request = ImportTokensRequest(tokens=[item, ImportTokenItem(google_cookies=NEW_COOKIES)])
+        self.assertEqual(len(request.tokens), 2)
+
+    def test_explicit_login_account_is_normalized(self):
+        from src.api.admin import ImportTokenItem
+
+        item = ImportTokenItem(
+            google_cookies=COOKIES, login_account="User@Example.com "
+        )
+        self.assertEqual(item.login_account, "user@example.com")
+
+
+class RefreshIntervalDefaultsTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Database(db_path=self.temp.name + "/flow.db")
+        await self.db.init_db()
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    async def test_default_refresh_interval_is_30_minutes(self):
+        self.assertEqual(Token(st="frontend-x", email=EMAIL).refresh_interval_minutes, 30)
+        config_row = await self.db.get_token_refresh_config()
+        self.assertEqual(config_row.refresh_interval_minutes, 30)
+
+    async def test_scheduler_uses_30_minutes_when_interval_is_missing(self):
+        token_id = await self.db.add_token(
+            Token(
+                st="frontend-x",
+                at="flow-frontend-cookie",
+                email=EMAIL,
+                google_cookies=COOKIES,
+            )
+        )
+        flow = MagicMock()
+        flow.FRONTEND_ACCESS_TOKEN = "flow-frontend-cookie"
+        flow.proxy_manager = None
+        flow.get_request_fingerprint.return_value = None
+        manager = TokenManager(self.db, flow)
+        self.assertEqual(manager._normalize_refresh_interval(None), 30)
+        token = await self.db.get_token(token_id)
+        self.assertEqual(token.refresh_interval_minutes, 30)
+        # 29 分钟前校验过 -> 还未到期
+        token.last_st_refresh_at = datetime.now(timezone.utc) - timedelta(minutes=29)
+        self.assertFalse(manager.needs_at_refresh(token))
+        # 31 分钟前校验过 -> 到期
+        token.last_st_refresh_at = datetime.now(timezone.utc) - timedelta(minutes=31)
+        self.assertTrue(manager.needs_at_refresh(token))
+
+    async def test_global_interval_can_be_applied_to_every_account(self):
+        first = await self.db.add_token(Token(st="frontend-a", email="a@example.com"))
+        second = await self.db.add_token(Token(st="frontend-b", email="b@example.com"))
+        updated = await self.db.update_all_tokens_refresh_interval(15)
+        self.assertEqual(updated, 2)
+        for token_id in (first, second):
+            self.assertEqual(
+                (await self.db.get_token(token_id)).refresh_interval_minutes, 15
+            )
+
+    async def test_interval_under_30_minutes_is_accepted(self):
+        from src.api.admin import ImportTokenItem, TokenRefreshConfigRequest
+
+        self.assertEqual(
+            ImportTokenItem(google_cookies=COOKIES, refresh_interval_minutes=10)
+            .refresh_interval_minutes,
+            10,
+        )
+        self.assertEqual(
+            TokenRefreshConfigRequest(
+                refresh_interval_minutes=5, apply_to_tokens=True
+            ).refresh_interval_minutes,
+            5,
+        )
+        with self.assertRaises(Exception):
+            TokenRefreshConfigRequest(refresh_interval_minutes=0)
 
 
 class BrowserCookieRefreshTests(unittest.IsolatedAsyncioTestCase):
