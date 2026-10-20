@@ -21,7 +21,7 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
-from .api import routes, admin
+from .api import routes, admin, videos
 
 
 _LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -268,6 +268,7 @@ generation_handler = GenerationHandler(
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
+videos.set_dependencies(db)
 admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager)
 
 # Create FastAPI app
@@ -290,6 +291,7 @@ app.add_middleware(
 # Include routers
 app.include_router(routes.router)
 app.include_router(admin.router)
+app.include_router(videos.router)
 
 # Static files - serve tmp directory for cached files
 tmp_dir = Path(__file__).parent.parent / "tmp"
