@@ -1924,8 +1924,13 @@ class GenerationHandler:
                 progress=100,
             )
 
-        except asyncio.CancelledError:
-            error_msg = "生成已取消: 客户端连接已断开"
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断开时，流式外层生成器被关闭，本生成器会在 yield 处收到 GeneratorExit
+            # （而非 CancelledError）；两者都需落库，避免日志永久停在 102。
+            if response_state.get("url"):
+                error_msg = "客户端连接已断开: 结果已生成，但未送达客户端"
+            else:
+                error_msg = "生成已取消: 客户端连接已断开"
             debug_logger.log_warning(f"[GENERATION] ⚠️ {error_msg}")
             duration = time.time() - start_time
             record_generation_result(
@@ -1937,15 +1942,22 @@ class GenerationHandler:
             prompt_for_log = (
                 prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
             )
+            disconnect_response = {"error": error_msg, "performance": perf_trace}
+            if response_state.get("url"):
+                disconnect_response["url"] = response_state["url"]
+            if response_state.get("generated_assets"):
+                disconnect_response["generated_assets"] = response_state[
+                    "generated_assets"
+                ]
             await self._log_request(
                 token.id if token else None,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if "request_payload" in locals() else {"model": model},
-                {"error": error_msg, "performance": perf_trace},
+                disconnect_response,
                 499,
                 duration,
                 log_id=request_log_state.get("id"),
-                status_text="failed",
+                status_text="client_disconnected",
                 progress=request_log_state.get("progress", 0),
             )
             raise
@@ -2251,6 +2263,9 @@ class GenerationHandler:
                                     "delivery_mode"
                                 ] = "frontend_url"
                                 self._mark_generation_succeeded(generation_result)
+                                await self._record_result_url_in_log(
+                                    request_log_state, token_id=token.id, response_state=response_state
+                                )
                                 if stream:
                                     yield self._create_stream_chunk(
                                         f"![Generated Image]({encoded_image})",
@@ -2292,6 +2307,9 @@ class GenerationHandler:
                                     "url"
                                 ] = local_url
                                 self._mark_generation_succeeded(generation_result)
+                                await self._record_result_url_in_log(
+                                    request_log_state, token_id=token.id, response_state=response_state
+                                )
                                 if stream:
                                     yield self._create_stream_chunk(
                                         f"✅ {resolution_name} 图片缓存成功\n"
@@ -2324,6 +2342,9 @@ class GenerationHandler:
                                     "delivery_mode"
                                 ] = "inline_base64_fallback"
                                 self._mark_generation_succeeded(generation_result)
+                                await self._record_result_url_in_log(
+                                    request_log_state, token_id=token.id, response_state=response_state
+                                )
                                 base64_url = f"data:image/jpeg;base64,{encoded_image}"
                                 if stream:
                                     cache_error = self._normalize_error_message(
@@ -2442,6 +2463,9 @@ class GenerationHandler:
                 final_assets["upscaled_image"] = upscaled_marker
             response_state["generated_assets"] = final_assets
             self._mark_generation_succeeded(generation_result)
+            await self._record_result_url_in_log(
+                request_log_state, token_id=token.id, response_state=response_state
+            )
 
             if stream:
                 yield self._create_stream_chunk(
@@ -3231,6 +3255,9 @@ class GenerationHandler:
 
                     # 返回结果
                     self._mark_generation_succeeded(generation_result)
+                    await self._record_result_url_in_log(
+                        request_log_state, token_id=token.id, response_state=response_state
+                    )
 
                     if stream:
                         yield self._create_stream_chunk(
@@ -3463,6 +3490,33 @@ class GenerationHandler:
             )
         except Exception as e:
             debug_logger.log_error(f"Failed to update request log progress: {e}")
+
+    async def _record_result_url_in_log(
+        self,
+        request_log_state: Optional[Dict[str, Any]],
+        *,
+        token_id: Optional[int],
+        response_state: Optional[Dict[str, Any]],
+    ):
+        """结果地址一确定就写入日志，即使之后客户端断开也能在管理页找到链接。"""
+        if not isinstance(response_state, dict):
+            return
+        url = response_state.get("url")
+        if not url:
+            return
+        assets = response_state.get("generated_assets") or {}
+        media_type = "video" if assets.get("type") == "video" else "image"
+        cached = str(url).startswith(f"{self._get_base_url(response_state)}/tmp/")
+        extra: Dict[str, Any] = {"url": url}
+        if assets:
+            extra["generated_assets"] = assets
+        await self._update_request_log_progress(
+            request_log_state,
+            token_id=token_id,
+            status_text=f"{media_type}_cached" if cached else "result_ready",
+            progress=95,
+            response_extra=extra,
+        )
 
     async def _log_request(
         self,

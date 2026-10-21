@@ -387,8 +387,9 @@ class FileCache:
                     env = None
 
                 wget_cmd.append(url)
-                result = subprocess.run(
-                    wget_cmd, capture_output=True, timeout=90, env=env
+                # 放到线程里执行，避免阻塞事件循环（否则下载期间所有请求都会卡住）
+                result = await asyncio.to_thread(
+                    subprocess.run, wget_cmd, capture_output=True, timeout=90, env=env
                 )
 
                 if result.returncode == 0 and file_path.exists():
@@ -450,7 +451,9 @@ class FileCache:
                     curl_cmd.extend(["-x", proxy_url])
 
                 curl_cmd.append(url)
-                result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
+                result = await asyncio.to_thread(
+                    subprocess.run, curl_cmd, capture_output=True, timeout=90
+                )
 
                 if result.returncode == 0 and file_path.exists():
                     file_size = file_path.stat().st_size
