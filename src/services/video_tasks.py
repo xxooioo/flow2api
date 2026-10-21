@@ -44,6 +44,10 @@ FAMILY_ALIASES = {
     "veo3.1": "quality",
     "veo-3.1-generate-preview": "quality",
     "veo-3.1-generate-001": "quality",
+    "veo-3.1-lite": "lite",
+    "veo3.1-lite": "lite",
+    "veo-3.1-lite-generate-preview": "lite",
+    "veo-3.1-lite-generate-001": "lite",
     "omni-1.1-flash": "omni",
     "omni-1.1-flash-preview": "omni",
     "omni": "omni",
@@ -65,6 +69,18 @@ VEO_MODELS = {
 RESOLUTION_SUFFIX = {"720p": "", "1080p": "_1080p", "4k": "_4k"}
 OMNI_SECONDS = (4, 6, 8, 10)
 VEO_SECONDS = 8
+# Fast 4/6 s and all of Lite exist only at 720p; reference mode is 8 s only.
+SHORT_SECONDS = (4, 6)
+FAST_SHORT_MODELS = {
+    "text": "veo-3.1-fast-{seconds}s-{orientation}",
+    "frames": "veo-3.1-fast-i2v-{seconds}s-{orientation}",
+}
+LITE_MODELS = {
+    "text": "veo_3_1_t2v_lite_{seconds}s_{orientation}",
+    "first_frame": "veo_3_1_i2v_lite_{seconds}s_{orientation}",
+    "first_last": "veo_3_1_interpolation_lite_{seconds}s_{orientation}",
+    "reference": "veo-3.1-lite-r2v-8s-{orientation}",
+}
 MAX_REFERENCE_IMAGES = 3
 
 VIDEO_SIZES = {
@@ -291,7 +307,7 @@ def parse_video_request(body: Dict[str, Any]) -> VideoJob:
     if family is None:
         config = MODEL_CONFIG.get(model)
         if not config or config.get("type") != "video":
-            supported = "veo-3.1-fast、veo-3.1-quality、omni-1.1-flash"
+            supported = "veo-3.1-fast、veo-3.1-quality、veo-3.1-lite、omni-1.1-flash"
             raise VideoRequestError(f"不支持的视频模型: {model}，可用: {supported}", code="model_not_found", status_code=404)
         images = ([first] if first else []) + ([last] if last else []) + plain
         return VideoJob(
@@ -346,10 +362,25 @@ def parse_video_request(body: Dict[str, Any]) -> VideoJob:
         mode = "text"
         images = []
 
-    variants = VEO_MODELS[family].get(mode)
-    if variants is None:
-        raise VideoRequestError(f"{model} 不支持参考图模式，请改用首尾帧或 veo-3.1-fast", code="unsupported_mode")
-    internal_model = variants[orientation == "portrait"] + RESOLUTION_SUFFIX[resolution]
+    # Only an explicit 4 or 6 selects a short clip; anything else keeps the 8 s default.
+    short = seconds if seconds in SHORT_SECONDS and family in ("fast", "lite") else None
+    if short and mode == "reference":
+        raise VideoRequestError("参考图模式只支持 8 秒", code="invalid_duration")
+    if (short or family == "lite") and resolution != "720p":
+        raise VideoRequestError(f"{'4/6 秒视频' if short else model}只支持 720p", code="invalid_resolution")
+
+    clip_seconds = short or VEO_SECONDS
+    names = {"seconds": clip_seconds, "orientation": orientation}
+    if family == "lite":
+        key = "first_last" if mode == "frames" and len(images) == 2 else ("first_frame" if mode == "frames" else mode)
+        internal_model = LITE_MODELS[key].format(**names)
+    elif short:
+        internal_model = FAST_SHORT_MODELS[mode].format(**names)
+    else:
+        variants = VEO_MODELS[family].get(mode)
+        if variants is None:
+            raise VideoRequestError(f"{model} 不支持参考图模式，请改用首尾帧或 veo-3.1-fast", code="unsupported_mode")
+        internal_model = variants[orientation == "portrait"] + RESOLUTION_SUFFIX[resolution]
     if internal_model not in MODEL_CONFIG:
         raise VideoRequestError(f"{model} 的这种模式不支持 {resolution}", code="invalid_resolution")
     return VideoJob(
@@ -358,7 +389,7 @@ def parse_video_request(body: Dict[str, Any]) -> VideoJob:
         prompt=prompt,
         image_sources=images,
         mode=mode,
-        seconds=VEO_SECONDS,
+        seconds=clip_seconds,
         resolution=resolution,
         orientation=orientation,
     )

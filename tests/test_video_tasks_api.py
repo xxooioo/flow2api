@@ -86,8 +86,35 @@ class ParseVideoRequestTests(unittest.TestCase):
         self.assertEqual(job.seconds, 6)
         self.assertEqual(job.mode, "reference")
 
+    def test_fast_short_durations(self):
+        text = parse_video_request({"model": "veo-3.1-fast", "prompt": "p", "duration": 4, "aspect_ratio": "9:16"})
+        self.assertEqual(text.internal_model, "veo-3.1-fast-4s-portrait")
+        self.assertEqual(text.seconds, 4)
+        frames = parse_video_request({"model": "veo-3.1-fast", "prompt": "p", "seconds": "6", "images": [PNG, PNG]})
+        self.assertEqual(frames.internal_model, "veo-3.1-fast-i2v-6s-landscape")
+        # Values other than 4/6 keep the verified 8 s path; Quality is always 8 s.
+        odd = parse_video_request({"model": "veo-3.1-fast", "prompt": "p", "duration": 5})
+        self.assertEqual((odd.internal_model, odd.seconds), ("veo_3_1_t2v_fast_ultra", 8))
+        quality = parse_video_request({"model": "veo-3.1-quality", "prompt": "p", "duration": 4})
+        self.assertEqual((quality.internal_model, quality.seconds), ("veo_3_1_t2v_landscape", 8))
+
+    def test_lite_modes(self):
+        cases = [
+            ({"duration": 4}, "veo_3_1_t2v_lite_4s_landscape", 4),
+            ({"images": [PNG], "aspect_ratio": "9:16"}, "veo_3_1_i2v_lite_8s_portrait", 8),
+            ({"duration": 6, "first_frame_url": PNG, "last_frame_url": PNG}, "veo_3_1_interpolation_lite_6s_landscape", 6),
+            ({"images": [PNG, PNG, PNG]}, "veo-3.1-lite-r2v-8s-landscape", 8),
+        ]
+        for extra, internal, seconds in cases:
+            with self.subTest(extra=extra):
+                job = parse_video_request({"model": "gemini-veo-3.1-lite", "prompt": "p", **extra})
+                self.assertEqual((job.internal_model, job.seconds), (internal, seconds))
+
     def test_rejections(self):
         cases = [
+            {"model": "veo-3.1-fast", "prompt": "p", "duration": 4, "resolution": "1080p"},
+            {"model": "veo-3.1-fast", "prompt": "p", "duration": 4, "images": [PNG] * 3},
+            {"model": "veo-3.1-lite", "prompt": "p", "resolution": "1080p"},
             {"model": "veo-3.1-quality", "prompt": "p", "images": [PNG, PNG, PNG]},
             {"model": "omni-1.1-flash", "prompt": "p", "first_frame_url": PNG},
             {"model": "omni-1.1-flash", "prompt": "p", "resolution": "1080p"},
