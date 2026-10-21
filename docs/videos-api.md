@@ -120,3 +120,34 @@ curl -o video.mp4 https://你的域名/v1/videos/<任务ID>/content -H "Authoriz
 3. 价格建议按次计费：New API 只从请求里读取时长和尺寸，客户端不传时长时按 4 秒计算。
 4. 不要对这个渠道点"测试"：测试走聊天接口，会真的发起一次生成。
 5. 用户调用 `https://你的NewAPI/v1/videos`，查询和下载也走 New API，字段与上面相同。
+
+### 经过 New API 调用时的写法
+
+New API（实测 v1.0.0-rc.45）转发自定义视频模型时只保留这些顶层字段：
+`model`、`prompt`、`mode`、`image`、`images`（字符串数组）、`size`、`duration`、`seconds`、`input_reference`、`metadata`。
+其他顶层字段（如 `aspect_ratio`、`resolution`、`reference_images`、`first_frame_url`）会被丢弃，
+所以通过 New API 调用时请这样写：
+
+| 需求 | 写法 |
+|---|---|
+| 竖屏 / 横屏 | `"size": "720x1280"` / `"1280x720"`，或 `"metadata": {"aspect_ratio": "9:16"}` |
+| 清晰度 | `"metadata": {"resolution": "1080p"}` |
+| 时长 | `"duration": 4` |
+| 普通参考图 / 首尾帧 | `"images": ["首帧", "尾帧"]`（1～2 张为首尾帧，3 张为参考图） |
+| 指定模式 | `"mode": "reference"` 或 `"mode": "frames"` |
+| 带 role 的图片 | `"metadata": {"reference_images": [{"url": "...", "role": "first_frame"}, ...]}` |
+
+示例（竖屏 1080p 首尾帧）：
+
+```bash
+curl https://你的NewAPI/v1/videos \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "veo-3.1-fast",
+    "prompt": "镜头平稳推进，从首帧过渡到尾帧",
+    "size": "720x1280",
+    "images": ["data:image/png;base64,<首帧>", "https://example.com/last.png"],
+    "metadata": {"resolution": "1080p"}
+  }'
+```
